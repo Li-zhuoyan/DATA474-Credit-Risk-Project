@@ -44,6 +44,12 @@ Lenders face a constant trade-off between approving risky loans and rejecting cr
 
 Open `end code.Rmd` in RStudio and run all code chunks sequentially.
 
-## Team
+## Team and contributions
 
-Zhuoyan Li, Zhiyao Liu, Yiqi Hu — Department of Statistics and Data Science, The University of Arizona.
+This was a collaborative final project completed by a three-person team. This repository is maintained by Zhuoyan Li for graduate application purposes, and individual contributions are listed below for transparency.
+
+- **Zhuoyan Li** — Modeling pipeline and results analysis: LASSO variable selection, ROSE oversampling, Random Forest and XGBoost training and comparison, ROC/AUC evaluation, and model selection rationale. Initiated the second stage of the analysis (PCA + K-means clustering) and presented the five borrower personas with tailored credit strategies.
+- **Yiqi Hu** — Exploratory data analysis and identification of the severe class imbalance; presented the dataset and the imbalance diagnosis that motivated ROSE oversampling.
+- **Zhiyao Liu** — Data cleaning, feature engineering, and visualization support. *(Please confirm or revise this line to reflect the actual contribution.)*
+
+Department of Statistics and Data Science, The University of Arizona. Course: DATA 474 (Instructor: Lianfen Qian).
