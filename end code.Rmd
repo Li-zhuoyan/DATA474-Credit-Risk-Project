@@ -1,0 +1,835 @@
+---
+title: "Untitled"
+output: html_document
+date: "2026-04-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# 加载必要的库
+library(dplyr)
+library(tidyr)
+library(caret)
+library(glmnet)
+
+# 读取数据集
+df <- read.csv("credit_risk_dataset.csv")
+
+# 数据清理：基础过滤
+df_clean <- df %>%
+  filter(person_income >= 0, person_age >= 18, loan_amnt >= 0)
+
+# ========== 1. 填补所有数值型缺失值（遍历每一列） ==========
+for (col in names(df_clean)) {
+  if (is.numeric(df_clean[[col]])) {
+    if (any(is.na(df_clean[[col]]))) {
+      df_clean[[col]][is.na(df_clean[[col]])] <- mean(df_clean[[col]], na.rm = TRUE)
+      cat(col, "缺失值已用均值填补\n")
+    }
+  }
+}
+
+# ========== 2. IQR剔除异常值（只对分布正常的变量） ==========
+remove_outliers_iqr <- function(df, cols) {
+  for (col in cols) {
+    Q1 <- quantile(df[[col]], 0.25, na.rm = TRUE)
+    Q3 <- quantile(df[[col]], 0.75, na.rm = TRUE)
+    IQR <- Q3 - Q1
+    lower_bound <- Q1 - 1.5 * IQR
+    upper_bound <- Q3 + 1.5 * IQR
+    
+    before <- nrow(df)
+    df <- df[df[[col]] >= lower_bound & df[[col]] <= upper_bound, ]
+    after <- nrow(df)
+    cat(col, "删除了", before - after, "个异常值\n")
+  }
+  return(df)
+}
+
+# 只对分布相对正常的变量用IQR
+numeric_cols_iqr <- c("person_age", "person_emp_length", "loan_int_rate")
+
+df_clean <- remove_outliers_iqr(df_clean, numeric_cols_iqr)
+
+# ========== 3. 填补所有类别型缺失值（遍历每一列） ==========
+fill_mode <- function(x) {
+  x <- as.character(x)
+  mode_val <- names(sort(table(x), decreasing = TRUE))[1]
+  x[is.na(x)] <- mode_val
+  return(x)
+}
+
+for (col in names(df_clean)) {
+  if (is.character(df_clean[[col]]) || is.factor(df_clean[[col]])) {
+    if (any(is.na(df_clean[[col]]))) {
+      df_clean[[col]] <- fill_mode(df_clean[[col]])
+      cat(col, "缺失值已用众数填补\n")
+    }
+  }
+}
+
+# ========== 4. 转换为因子并独热编码 ==========
+# 转换为因子
+df_clean <- df_clean %>%
+  mutate(across(c(person_home_ownership, loan_intent, cb_person_default_on_file), as.factor))
+
+# 检查每个待编码因子的水平数
+factor_cols <- c("person_home_ownership", "loan_intent", "cb_person_default_on_file")
+for (col in factor_cols) {
+  cat(col, "有", nlevels(df_clean[[col]]), "个水平\n")
+}
+
+# 只保留水平数 >= 2 的因子进行独热编码
+cols_to_encode <- factor_cols[sapply(df_clean[factor_cols], nlevels) >= 2]
+
+# 生成独热编码矩阵（仅对有效列）
+if (length(cols_to_encode) > 0) {
+  formula_str <- paste(paste(cols_to_encode, collapse = " + "))
+  formula_obj <- as.formula(paste("~", formula_str, "- 1"))
+  dummy_matrix <- model.matrix(formula_obj, data = df_clean)
+  
+  # 合并编码后的数据
+  df_encoded <- cbind(df_clean %>% select(-all_of(cols_to_encode)), dummy_matrix)
+} else {
+  df_encoded <- df_clean
+  warning("没有至少两个水平的因子列，跳过独热编码")
+}
+
+# 检查处理后的数据
+head(df_encoded)
+
+# 记录最终行数
+cat("\n最终数据行数:", nrow(df_encoded), "\n")
+
+# 导出清洗编码后的数据
+write.csv(df_encoded, "df_encoded_cleaned.csv", row.names = FALSE)
+cat("数据已导出: df_encoded_cleaned.csv\n")
+```
+
+```{r}
+# 设置图形参数
+par(mfrow = c(1, 3), mar = c(5, 4, 4, 2))
+
+# 1. person_age
+boxplot(list(处理前 = df$person_age, 处理后 = df_clean$person_age),
+        main = "年龄分布对比",
+        col = c("#F4A582", "#92C5DE"),
+        ylab = "年龄",
+        border = "gray40",
+        cex.main = 1.2,
+        cex.axis = 0.9,
+        ylim = c(0, 80))
+
+# 2. person_emp_length
+boxplot(list(处理前 = df$person_emp_length, 处理后 = df_clean$person_emp_length),
+        main = "工作年限分布对比",
+        col = c("#F4A582", "#92C5DE"),
+        ylab = "工作年限",
+        border = "gray40",
+        cex.main = 1.2,
+        cex.axis = 0.9,
+        ylim = c(0, 60))
+
+# 3. loan_int_rate
+boxplot(list(处理前 = df$loan_int_rate, 处理后 = df_clean$loan_int_rate),
+        main = "贷款利率分布对比",
+        col = c("#F4A582", "#92C5DE"),
+        ylab = "利率 (%)",
+        border = "gray40",
+        cex.main = 1.2,
+        cex.axis = 0.9,
+        ylim = c(0, 30))
+
+# 添加图例
+par(fig = c(0, 1, 0, 1), oma = c(0, 0, 0, 0), mar = c(0, 0, 0, 0), new = TRUE)
+plot(0, 0, type = "n", axes = FALSE, xlab = "", ylab = "")
+legend("bottom", legend = c("处理前", "处理后"), 
+       fill = c("#F4A582", "#92C5DE"), 
+       horiz = TRUE, bty = "n", cex = 1.2)
+```
+```{r}
+library(ROSE)
+
+# 先执行 ROSE 过采样
+set.seed(123)
+train_balanced <- ROSE(y_train ~ ., data = cbind(y_train, X_train), p = 0.5, seed = 123)$data
+
+# 提取平衡后的数据
+y_train_bal <- train_balanced$y_train
+X_train_bal <- train_balanced[, -1]
+
+# 对比数据
+before_table <- table(y_train)
+after_table <- table(y_train_bal)
+
+# 并排柱状图
+par(mfrow = c(1, 2))
+
+barplot(before_table, 
+        names.arg = c("normal(0)", "default (1)"),
+        col = c("steelblue", "coral"),
+        main = "Before",
+        ylab = "frequency",
+        ylim = c(0, max(before_table) * 1.1))
+text(x = c(0.7, 1.9), y = before_table + 200, 
+     labels = paste0(before_table, "\n(", round(prop.table(before_table)*100, 1), "%)"))
+
+barplot(after_table, 
+        names.arg = c("normal (0)", "defualt (1)"),
+        col = c("steelblue", "coral"),
+        main = "after",
+        ylab = "frequency",
+        ylim = c(0, max(after_table) * 1.1))
+text(x = c(0.7, 1.9), y = after_table + 200, 
+     labels = paste0(after_table, "\n(", round(prop.table(after_table)*100, 1), "%)"))
+```
+```{r}
+library(corrplot)
+
+# 选择数值型特征（包括独热编码后的关键列）
+numeric_cols <- names(df_encoded)[sapply(df_encoded, is.numeric)]
+# 排除pred_prob（如果有）
+numeric_cols <- numeric_cols[!numeric_cols %in% "pred_prob"]
+
+# 计算相关系数矩阵
+cor_matrix <- cor(df_encoded[, numeric_cols], use = "complete.obs")
+
+# 画热力图
+corrplot(cor_matrix, 
+         method = "color", 
+         type = "upper", 
+         order = "hclust",
+         tl.cex = 0.7,
+         tl.col = "black",
+         title = "特征相关性热力图",
+         mar = c(0, 0, 2, 0))
+
+# 可选：只显示与loan_status的相关性（更简洁）
+cor_with_target <- cor(df_encoded[, numeric_cols], df_encoded$loan_status, use = "complete.obs")
+cor_df <- data.frame(Feature = rownames(cor_with_target), 
+                     Correlation = cor_with_target[, 1])
+cor_df <- cor_df[order(abs(cor_df$Correlation), decreasing = TRUE), ]
+
+# 条形图展示与违约的相关性
+barplot(cor_df$Correlation[1:15], 
+        names.arg = cor_df$Feature[1:15], 
+        las = 2, 
+        col = ifelse(cor_df$Correlation[1:15] > 0, "coral", "steelblue"),
+        main = "各特征与违约的相关性（前15）",
+        ylab = "相关系数",
+        cex.names = 0.7)
+abline(h = 0, lty = 2)
+```
+
+```{r}
+library(glmnet)
+
+# 重新定义 y（与 X 保持一致）
+y <- df_encoded$loan_status
+
+# 只选择数值类型的列
+X <- df_encoded[, sapply(df_encoded, is.numeric)]
+X <- X[, !names(X) %in% "loan_status"]
+
+# 检查行数是否一致
+cat("X行数:", nrow(X), "\n")
+cat("y长度:", length(y), "\n")
+
+# 检查是否还有因子列
+any(sapply(X, is.factor))
+
+X[is.na(X)] <- 0
+
+lasso_model <- cv.glmnet(as.matrix(X), y, alpha = 1, family = "binomial")
+
+coef(lasso_model, s = "lambda.min")
+
+```
+
+```{r}
+library(randomForest)
+library(xgboost)
+library(pROC)
+library(ROSE)
+
+# 基于LASSO筛选后的变量准备数据
+selected_vars <- c("person_age", "person_income", "person_emp_length", 
+                   "loan_amnt", "loan_int_rate", "loan_percent_income","cb_person_cred_hist_length",
+                   "person_home_ownershipOTHER", "person_home_ownershipOWN", 
+                   "person_home_ownershipRENT", "loan_intentEDUCATION",
+                   "loan_intentHOMEIMPROVEMENT", "loan_intentMEDICAL", 
+                   "loan_intentPERSONAL", "loan_intentVENTURE",
+                   "cb_person_default_on_fileY")
+
+X_selected <- df_encoded[, selected_vars]
+y <- df_encoded$loan_status
+
+# 检查并处理缺失值
+X_selected[is.na(X_selected)] <- 0
+
+# 划分训练集和测试集
+set.seed(123)
+trainIndex <- createDataPartition(y, p = 0.8, list = FALSE)
+X_train <- X_selected[trainIndex, ]
+y_train <- y[trainIndex]
+X_test <- X_selected[-trainIndex, ]
+y_test <- y[-trainIndex]
+
+# 再次检查测试集缺失值
+X_test[is.na(X_test)] <- 0
+
+# 处理类别不平衡 - 过采样
+set.seed(123)
+train_balanced <- ROSE(y_train ~ ., data = cbind(y_train, X_train), p = 0.5, seed = 123)$data
+y_train_bal <- train_balanced$y_train
+X_train_bal <- train_balanced[, -1]
+
+# Random Forest
+rf_model <- randomForest(x = X_train_bal, y = as.factor(y_train_bal), ntree = 100, importance = TRUE)
+rf_pred <- predict(rf_model, X_test, type = "prob")[, 2]
+rf_class <- ifelse(rf_pred > 0.5, 1, 0)
+
+# XGBoost
+dtrain <- xgb.DMatrix(data = as.matrix(X_train_bal), label = y_train_bal)
+dtest <- xgb.DMatrix(data = as.matrix(X_test), label = y_test)
+
+xgb_model <- xgb.train(data = dtrain, nrounds = 100, objective = "binary:logistic", 
+                       eval_metric = "auc", verbose = 0)
+xgb_pred <- predict(xgb_model, dtest)
+xgb_class <- ifelse(xgb_pred > 0.5, 1, 0)
+
+# 评估函数
+evaluate <- function(pred_class, pred_prob, y_true, model_name) {
+  cm <- confusionMatrix(factor(pred_class), factor(y_true))
+  roc_obj <- roc(y_true, pred_prob)
+  
+  cat("\n========== ", model_name, " ==========\n")
+  cat("Accuracy:", round(cm$overall["Accuracy"], 4), "\n")
+  cat("Precision:", round(cm$byClass["Precision"], 4), "\n")
+  cat("Recall:", round(cm$byClass["Sensitivity"], 4), "\n")
+  cat("F1:", round(cm$byClass["F1"], 4), "\n")
+  cat("AUC:", round(auc(roc_obj), 4), "\n")
+  print(cm$table)
+  
+  return(list(cm = cm, auc = auc(roc_obj), roc = roc_obj))
+}
+
+# 评估两个模型
+rf_results <- evaluate(rf_class, rf_pred, y_test, "Random Forest")
+xgb_results <- evaluate(xgb_class, xgb_pred, y_test, "XGBoost")
+
+# ROC曲线对比
+plot(rf_results$roc, col = "blue", main = "ROC Curves Comparison")
+lines(xgb_results$roc, col = "red")
+legend("bottomright", legend = c(paste("RF AUC =", round(rf_results$auc, 4)),
+                                  paste("XGB AUC =", round(xgb_results$auc, 4))),
+       col = c("blue", "red"), lty = 1)
+
+# Random Forest特征重要性
+importance_df <- as.data.frame(importance(rf_model))
+importance_df$Feature <- rownames(importance_df)
+importance_df <- importance_df[order(-importance_df$MeanDecreaseGini), ]
+print(importance_df)
+
+# 保存特征重要性
+write.csv(importance_df, "feature_importance.csv", row.names = FALSE)
+```
+```{r}
+library(ROSE)
+
+# 先执行 ROSE 过采样
+set.seed(123)
+train_balanced <- ROSE(y_train ~ ., data = cbind(y_train, X_train), p = 0.5, seed = 123)$data
+
+# 提取平衡后的数据
+y_train_bal <- train_balanced$y_train
+X_train_bal <- train_balanced[, -1]
+
+# 对比数据
+before_table <- table(y_train)
+after_table <- table(y_train_bal)
+
+# 并排柱状图
+par(mfrow = c(1, 2))
+
+barplot(before_table, 
+        names.arg = c("正常 (0)", "违约 (1)"),
+        col = c("steelblue", "coral"),
+        main = "过采样前",
+        ylab = "频数",
+        ylim = c(0, max(before_table) * 1.1))
+text(x = c(0.7, 1.9), y = before_table + 200, 
+     labels = paste0(before_table, "\n(", round(prop.table(before_table)*100, 1), "%)"))
+
+barplot(after_table, 
+        names.arg = c("正常 (0)", "违约 (1)"),
+        col = c("steelblue", "coral"),
+        main = "ROSE过采样后",
+        ylab = "频数",
+        ylim = c(0, max(after_table) * 1.1))
+text(x = c(0.7, 1.9), y = after_table + 200, 
+     labels = paste0(after_table, "\n(", round(prop.table(after_table)*100, 1), "%)"))
+```
+
+```{r}
+# 用训练好的XGBoost模型预测全量数据的违约概率
+full_data_matrix <- as.matrix(X_selected)
+full_data_matrix[is.na(full_data_matrix)] <- 0
+
+dall <- xgb.DMatrix(data = full_data_matrix)
+
+all_pred_prob <- predict(xgb_model, dall)
+# 计算全量违约率
+full_default_rate <- mean(df_encoded$loan_status)
+cat("full_default_rate:", full_default_rate, "\n")
+
+# 添加到原数据
+df_encoded$pred_prob <- all_pred_prob
+
+# 提取高风险样本（预测概率最高的20%）
+threshold <- quantile(all_pred_prob, 0.8)
+high_risk <- df_encoded[all_pred_prob >= threshold, ]
+
+cat("Total sample size:", nrow(df_encoded), "\n")
+cat("hige-risk samples:", nrow(high_risk), "\n")
+cat("High-risk threshold:", threshold, "\n")
+
+# 查看高风险样本的违约率
+cat("The actual default rate in high-risk samples:", mean(high_risk$loan_status), "\n")
+```
+```{r}
+# Predict default probabilities on full data using the trained Random Forest model
+full_data_matrix_rf <- as.matrix(X_selected)
+full_data_matrix_rf[is.na(full_data_matrix_rf)] <- 0
+
+rf_pred_prob <- predict(rf_model, as.data.frame(full_data_matrix_rf), type = "prob")[, 2]
+
+# Calculate full default rate
+full_default_rate <- mean(df_encoded$loan_status)
+cat("full_default_rate:", full_default_rate, "\n")
+
+# Add to original data
+df_encoded$rf_pred_prob <- rf_pred_prob
+
+# Extract high-risk samples (top 20% predicted probability)
+threshold_rf <- quantile(rf_pred_prob, 0.8)
+high_risk_rf <- df_encoded[rf_pred_prob >= threshold_rf, ]
+
+cat("Total sample size:", nrow(df_encoded), "\n")
+cat("High-risk samples:", nrow(high_risk_rf), "\n")
+cat("High-risk threshold:", threshold_rf, "\n")
+cat("The actual default rate in high-risk samples:", mean(high_risk_rf$loan_status), "\n")
+```
+
+
+```{r}
+"person_emp_length" %in% names(high_risk)
+"loan_int_rate" %in% names(high_risk)
+```
+
+```{r}
+# 选择用于PCA的特征（使用LASSO筛选出的15个变量）
+high_risk_features <- high_risk[, selected_vars]
+
+# 检查并处理缺失值
+high_risk_features[is.na(high_risk_features)] <- 0
+
+# 标准化（PCA前必须做）
+high_risk_scaled <- scale(high_risk_features)
+
+cat("特征维度:", dim(high_risk_scaled), "\n")
+cat("是否有缺失值:", any(is.na(high_risk_scaled)), "\n")
+```
+
+```{r}
+# 执行PCA
+pca_result <- prcomp(high_risk_scaled, center = FALSE, scale. = FALSE)
+
+# 查看方差解释比例
+var_explained <- summary(pca_result)$importance[2, ]  # 方差比例
+cum_var_explained <- summary(pca_result)$importance[3, ]  # 累计方差比例
+
+# 显示前10个主成分的方差解释率
+cat("主成分方差解释率:\n")
+for(i in 1:10) {
+  cat("PC", i, ": ", round(var_explained[i] * 100, 2), "% (累计: ", round(cum_var_explained[i] * 100, 2), "%)\n")
+}
+
+# 确定保留的主成分数量（累计方差 >= 80%）
+n_pc <- which(cum_var_explained >= 0.8)[1]
+cat("\n保留", n_pc, "个主成分，累计解释", round(cum_var_explained[n_pc] * 100, 2), "%的方差")
+
+# 提取降维后的数据
+pca_data <- pca_result$x[, 1:n_pc]
+cat("\n降维后数据维度:", dim(pca_data))
+```
+
+```{r}
+# 计算不同K值的轮廓系数，找出最佳聚类数
+library(cluster)
+
+# 测试K=2到10
+sil_scores <- c()
+for(k in 2:10) {
+  set.seed(123)
+  km_result <- kmeans(pca_data, centers = k, nstart = 25)
+  sil <- silhouette(km_result$cluster, dist(pca_data))
+  sil_scores[k-1] <- mean(sil[, 3])
+  cat("K =", k, "轮廓系数 =", round(sil_scores[k-1], 4), "\n")
+}
+
+# 最佳K值
+best_k <- which.max(sil_scores) + 1
+cat("\n最佳K值:", best_k)
+
+library(ggplot2)
+
+# 构建数据框（K=2 到 10）
+df_sil <- data.frame(
+  K = 2:10,
+  Silhouette = sil_scores
+)
+
+# 绘图
+ggplot(df_sil, aes(x = K, y = Silhouette)) +
+  geom_line(color = "#2C3E50", linewidth = 1.2) +          # 深灰线
+  geom_point(color = "#E74C3C", size = 3.5, shape = 19) +  # 红色实心点
+  geom_text(aes(label = sprintf("%.3f", Silhouette)), 
+            vjust = -1.2, hjust = 0.5, size = 3.5, color = "#2C3E50") +  # 数值标签
+  labs(
+    title = "轮廓系数随聚类数 K 的变化",
+    x = "Cluster(K)",
+    y = "Contour coefficient"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+    axis.title = element_text(face = "bold"),
+    panel.grid.major = element_line(color = "gray92") 
+  
+  ) +
+  ylim(0, 0.3)
+```
+
+```{r}
+# 查看high_risk中有哪些列
+names(high_risk)
+```
+
+```{r}
+# 1. 先补回缺失的列
+high_risk$person_emp_length <- df_encoded[rownames(high_risk), "person_emp_length"]
+high_risk$loan_int_rate <- df_encoded[rownames(high_risk), "loan_int_rate"]
+
+# 2. 然后做聚类（这会创建 cluster_cont 列）
+cont_features <- high_risk[, c("person_age", "person_income", "person_emp_length", 
+                                 "loan_amnt", "loan_int_rate", "loan_percent_income")]
+
+cont_scaled <- scale(cont_features)
+cont_scaled[is.na(cont_scaled)] <- 0
+
+set.seed(123)
+km_final <- kmeans(cont_scaled, centers = 5, nstart = 25)
+high_risk$cluster_cont <- km_final$cluster   # 这里创建 cluster_cont
+
+# 3. 最后才能 group_by(cluster_cont)
+cluster_profile_cont <- high_risk %>%
+  group_by(cluster_cont) %>%
+  summarise(
+    count = n(),
+    违约率 = mean(loan_status),
+    年龄 = mean(person_age),
+    收入 = mean(person_income),
+    工作年限 = mean(person_emp_length, na.rm = TRUE),
+    贷款金额 = mean(loan_amnt),
+    利率 = mean(loan_int_rate, na.rm = TRUE),
+    收入负债比 = mean(loan_percent_income)
+  )
+
+print(cluster_profile_cont)
+
+
+```
+```{r}
+# === 假设您已有以下对象（来自您之前的代码）===
+# high_risk_features: 15个特征的原始数据框（已处理缺失值）
+# high_risk_scaled: 标准化后的数据（用于PCA）
+# pca_result: prcomp() 的结果对象
+
+# 1. 提取载荷矩阵（loadings）——注意：prcomp 的 loadings 是旋转后的特征向量
+# prcomp 默认返回的是 rotation 矩阵（即载荷），维度为 p × k（15 × 10）
+loadings <- pca_result$rotation[, 1:10]  # 取前10个主成分
+
+# 2. 确保行名是变量名（若没有，手动赋值）
+if (is.null(rownames(loadings))) {
+  rownames(loadings) <- names(high_risk_features)
+}
+colnames(loadings) <- paste0("PC", 1:10)
+
+# 3. 绘制热力图（使用 ggplot2 + reshape2 或 tidyr）
+library(ggplot2)
+library(reshape2)  # 或用 tidyr::pivot_longer
+
+# 将矩阵转为长格式
+loadings_long <- melt(loadings, 
+                      varnames = c("Original_Feature", "Principal_Component"),
+                      value.name = "Loading")
+
+# 4. 绘图
+p <- ggplot(loadings_long, aes(x = Principal_Component, y = Original_Feature, fill = Loading)) +
+  geom_tile(color = "white", linewidth = 0.1) +
+  scale_fill_gradient2(
+    low = "#4477AA",      # 蓝色（负）
+    mid = "white",        # 中性
+    high = "#CC3311",     # 红色（正）
+    midpoint = 0,
+    name = "载荷权重"
+  ) +
+  labs(
+    title = "PCA 载荷矩阵热图 (15个原始特征 → 10个主成分)",
+    subtitle = "反映了各原始指标在降维后的权重分布",
+    x = "主成分 (PCs)",
+    y = "原始特征变量"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    axis.text.y = element_text(size = 9, face = "plain"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    legend.position = "right"
+  )
+
+# 显示图形
+print(p)
+
+# （可选）保存图片
+# ggsave("pca_loadings_heatmap.png", p, width = 10, height = 8, dpi = 300)
+```
+
+```{r}
+# 备选方案：所有cluster在一个图上并排显示
+library(ggplot2)
+library(dplyr)
+
+# 准备数据
+plot_data_wide <- high_risk %>%
+  select(cluster_cont, person_age, person_income, person_emp_length, 
+         loan_amnt, loan_int_rate, loan_percent_income) %>%
+  group_by(cluster_cont) %>%
+  summarise(
+    Age = mean(person_age, na.rm = TRUE),
+    Income = mean(person_income, na.rm = TRUE),
+    `Employment Length` = mean(person_emp_length, na.rm = TRUE),
+    `Loan Amount` = mean(loan_amnt, na.rm = TRUE),
+    `Interest Rate` = mean(loan_int_rate, na.rm = TRUE),
+    `Debt-to-Income Ratio` = mean(loan_percent_income, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  pivot_longer(cols = -cluster_cont, names_to = "feature", values_to = "mean_value") %>%
+  group_by(feature) %>%
+  mutate(
+    scaled_value = (mean_value - mean(mean_value)) / sd(mean_value),
+    feature = factor(feature, levels = c("Debt-to-Income Ratio", "Interest Rate", 
+                                          "Loan Amount", "Employment Length", 
+                                          "Income", "Age"))
+  ) %>%
+  ungroup()
+
+# 画分组条形图
+p_grouped <- ggplot(plot_data_wide, aes(x = scaled_value, y = feature, fill = factor(cluster_cont))) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.7), width = 0.6) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.4) +
+  scale_fill_manual(
+    values = c("#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e"),
+    name = "Cluster"
+  ) +
+  labs(
+    title = "Key Feature Contribution per High-Risk Cluster",
+    subtitle = "Standardized scores > 0 indicate the feature is above the group average",
+    x = "Standardized Score",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 10, hjust = 0.5, color = "gray40"),
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 9),
+    legend.position = "bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 9),
+    panel.grid.major.y = element_blank()
+  )
+
+print(p_grouped)
+ggsave("cluster_bar_chart_grouped.png", p_grouped, width = 10, height = 6, dpi = 300)
+```
+
+```{r}
+# 加载必要的包
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(patchwork)
+
+# 假设 cluster_profile_cont 已经存在，先查看一下数据
+print(cluster_profile_cont)
+
+# 计算总体均值和标准差用于标准化
+总体均值 <- cluster_profile_cont %>%
+  summarise(
+    年龄_mean = mean(年龄),
+    收入_mean = mean(收入),
+    工作年限_mean = mean(工作年限, na.rm = TRUE),
+    贷款金额_mean = mean(贷款金额),
+    利率_mean = mean(利率, na.rm = TRUE),
+    收入负债比_mean = mean(收入负债比)
+  )
+
+总体标准差 <- cluster_profile_cont %>%
+  summarise(
+    年龄_sd = sd(年龄),
+    收入_sd = sd(收入),
+    工作年限_sd = sd(工作年限, na.rm = TRUE),
+    贷款金额_sd = sd(贷款金额),
+    利率_sd = sd(利率, na.rm = TRUE),
+    收入负债比_sd = sd(收入负债比)
+  )
+
+# 计算标准化分数
+plot_data <- cluster_profile_cont %>%
+  mutate(
+    年龄_std = (年龄 - 总体均值$年龄_mean) / 总体标准差$年龄_sd,
+    收入_std = (收入 - 总体均值$收入_mean) / 总体标准差$收入_sd,
+    工作年限_std = (工作年限 - 总体均值$工作年限_mean) / 总体标准差$工作年限_sd,
+    贷款金额_std = (贷款金额 - 总体均值$贷款金额_mean) / 总体标准差$贷款金额_sd,
+    利率_std = (利率 - 总体均值$利率_mean) / 总体标准差$利率_sd,
+    收入负债比_std = (收入负债比 - 总体均值$收入负债比_mean) / 总体标准差$收入负债比_sd
+  ) %>%
+  select(cluster_cont, 年龄_std, 收入_std, 工作年限_std, 贷款金额_std, 利率_std, 收入负债比_std) %>%
+  pivot_longer(cols = -cluster_cont, names_to = "feature", values_to = "std_score") %>%
+  mutate(
+    feature_clean = case_when(
+      feature == "年龄_std" ~ "Age",
+      feature == "收入_std" ~ "Income",
+      feature == "工作年限_std" ~ "Employment Length",
+      feature == "贷款金额_std" ~ "Loan Amount",
+      feature == "利率_std" ~ "Interest Rate",
+      feature == "收入负债比_std" ~ "Debt-to-Income Ratio"
+    ),
+    # 设置特征的顺序（从上到下）
+    feature_clean = factor(feature_clean, levels = c("Debt-to-Income Ratio", "Interest Rate", 
+                                                      "Loan Amount", "Employment Length", 
+                                                      "Income", "Age")),
+    cluster_label = paste("Cluster", cluster_cont)
+  )
+
+# 方法1：分面图（最简单，不会报错）
+p_facet <- ggplot(plot_data, aes(x = std_score, y = feature_clean)) +
+  geom_bar(stat = "identity", 
+           aes(fill = std_score > 0),
+           width = 0.7) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+  scale_fill_manual(values = c("TRUE" = "#4575b4", "FALSE" = "#d73027"), guide = "none") +
+  facet_wrap(~ cluster_label, ncol = 3) +
+  labs(
+    title = "Key Feature Contribution per High-Risk Cluster",
+    subtitle = "Standardized scores > 0 indicate the feature is above the group average.",
+    x = "Standardized Score",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 10, hjust = 0.5, color = "gray40"),
+    strip.text = element_text(size = 10, face = "bold"),
+    axis.text.x = element_text(size = 8),
+    axis.text.y = element_text(size = 9),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+print(p_facet)
+ggsave("cluster_comparison_facet.png", p_facet, width = 12, height = 8, dpi = 300)
+
+# 方法2：如果你还是想要单独的5个图（不用plot_spacer）
+# 创建5个单独的图并保存
+for(i in 1:5) {
+  cluster_data <- plot_data %>% filter(cluster_cont == i)
+  
+  p_single <- ggplot(cluster_data, aes(x = std_score, y = feature_clean)) +
+    geom_bar(stat = "identity", 
+             aes(fill = std_score > 0),
+             width = 0.7) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+    scale_fill_manual(values = c("TRUE" = "#4575b4", "FALSE" = "#d73027"), guide = "none") +
+    labs(title = paste("Segment Profile: Cluster", i), 
+         x = "Standardized Score", 
+         y = NULL) +
+    coord_cartesian(xlim = c(-2, 2)) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+      axis.text.x = element_text(size = 9),
+      axis.text.y = element_text(size = 10),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+  
+  # 单独保存每个图
+  ggsave(paste0("cluster_", i, "_profile.png"), p_single, width = 5, height = 4, dpi = 300)
+  print(p_single)  # 在RStudio中显示
+}
+
+# 方法3：使用patchwork但避免plot_spacer（2x3布局，最后一个位置放图例或留空）
+# 先创建5个图
+plots <- list()
+for(i in 1:5) {
+  cluster_data <- plot_data %>% filter(cluster_cont == i)
+  
+  plots[[i]] <- ggplot(cluster_data, aes(x = std_score, y = feature_clean)) +
+    geom_bar(stat = "identity", 
+             aes(fill = std_score > 0),
+             width = 0.7) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+    scale_fill_manual(values = c("TRUE" = "#4575b4", "FALSE" = "#d73027"), guide = "none") +
+    labs(title = paste("Cluster", i), x = NULL, y = NULL) +
+    coord_cartesian(xlim = c(-2, 2)) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 10, face = "bold", hjust = 0.5),
+      axis.text.x = element_text(size = 7),
+      axis.text.y = element_text(size = 8),
+      panel.grid.major.y = element_blank(),
+      panel.grid.minor = element_blank(),
+      plot.margin = margin(5, 5, 5, 5)
+    )
+}
+
+# 创建图例说明的空白图
+legend_plot <- ggplot() +
+  annotate("text", x = 0.5, y = 0.5, 
+           label = "Blue: Above average\nRed: Below average\nDashed line: Group average", 
+           size = 4, hjust = 0.5) +
+  theme_void() +
+  theme(plot.margin = margin(10, 10, 10, 10))
+
+# 组合：2行，第一行3个图，第二行2个图+图例
+combined_plot <- (plots[[1]] | plots[[2]] | plots[[3]]) /
+                 (plots[[4]] | plots[[5]] | legend_plot) +
+  plot_annotation(
+    title = "Key Feature Contribution per High-Risk Cluster",
+    subtitle = "Standardized scores > 0 indicate the feature is above the group average.",
+    theme = theme(
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(size = 10, hjust = 0.5, color = "gray40")
+    )
+  )
+
+print(combined_plot)
+ggsave("cluster_combined.png", combined_plot, width = 12, height = 8, dpi = 300)
+```
