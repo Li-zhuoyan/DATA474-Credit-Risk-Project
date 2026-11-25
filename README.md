@@ -33,12 +33,9 @@ Lenders face a constant trade-off between approving risky loans and rejecting cr
 
 ## Repository contents
 
-- `Machine Learning for Credit Risk(2).pdf` — final report
+- `README.md` — project overview, methods, results, and team contributions
+- `Machine Learning for Credit Risk.pdf` — final report
 - `end code.Rmd` — final R code
-- `feature_importance.csv` — variable importance output
-- `cluster_*.png`, `cluster_bar_chart_grouped.png`, `cluster_comparison_facet.png` — visualization figures
-- `Machine Learning Project Proposal.docx` — project proposal
-- `演示文稿1.pptx` — presentation slides
 
 ## How to reproduce
 
@@ -48,8 +45,8 @@ Open `end code.Rmd` in RStudio and run all code chunks sequentially.
 
 This was a collaborative final project completed by a three-person team. This repository is maintained by Zhuoyan Li for graduate application purposes, and individual contributions are listed below for transparency.
 
-- **Zhuoyan Li** — Modeling pipeline and results analysis: LASSO variable selection, ROSE oversampling, Random Forest and XGBoost training and comparison, ROC/AUC evaluation, and model selection rationale. Initiated the second stage of the analysis (PCA + K-means clustering) and presented the five borrower personas with tailored credit strategies.
-- **Yiqi Hu** — Exploratory data analysis and identification of the severe class imbalance; presented the dataset and the imbalance diagnosis that motivated ROSE oversampling.
-- **Zhiyao Liu** — Data cleaning, feature engineering, and visualization support. *(Please confirm or revise this line to reflect the actual contribution.)*
+- **Zhuoyan Li** — Led the modeling stage: LASSO variable selection (17 predictors retained), ROSE oversampling to address class imbalance, and the training and comparison of Random Forest and XGBoost, evaluated with ROC curves and AUC. Proposed the second-stage analysis — PCA plus K-means clustering of the top-20% high-risk borrowers — and interpreted the five borrower personas with tailored credit strategies.
+- **Yiqi Hu** — Led data exploration and preprocessing: filtered invalid records, imputed missing values, removed outliers using the IQR method, encoded categorical features, and examined feature correlations. Identified the severe class imbalance in the dataset, which motivated the oversampling strategy used in modeling.
+- **Zhiyao Liu** — Contributed to model interpretation and the high-risk group analysis: compared the default rate of the top-20% high-risk segment against the overall baseline (about 0.72 vs. 0.218), helped interpret the PCA components and the five borrower profiles, and summarized implications for targeted credit policies and future work.
 
 Department of Statistics and Data Science, The University of Arizona. Course: DATA 474 (Instructor: Lianfen Qian).
